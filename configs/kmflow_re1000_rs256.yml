@@ -1,0 +1,55 @@
+log_dir: "./experiments/kmflow_re1000_rs256_ddim_new"
+
+data:
+    dataset: "kmflow"
+    category: "kmflow"
+    # image_size: 160
+    image_size: 256
+    channels: 3
+    num_workers: 4
+    data_dir: "./data/kf_2d_re1000_256_40seed.npy"
+    stat_path: "./pretrained_weights/km256_stats.npz"
+    blur_method: "nearest"
+    blur_scale: 8
+    data_kw: 'u3232'
+    smoothing: False
+    smoothing_scale: 0 
+    sample_data_dir: "./data/kmflow_sampled_data_irregnew.npz"
+
+
+
+model:
+    type: "simple"
+    # type: "conditional"
+    in_channels: 3
+    # in_channels: 4
+    out_ch: 3
+    ch: 64
+    ch_mult: [ 1, 1, 1, 2 ]
+    num_res_blocks: 1
+    attn_resolutions: [ 16, ]
+    dropout: 0.0
+    var_type: fixedlarge
+    ema_rate: 0.9999
+    ema: True
+    resamp_with_conv: True
+    ckpt_path: "./pretrained_weights/baseline_ckpt.pth"
+    # ckpt_path: "./pretrained_weights/conditional_ckpt.pth"
+    # padding_mode: "zeros" # zeros or circular
+    padding_mode: "circular" # zeros or circular
+
+diffusion:
+    beta_schedule: linear
+    beta_start: 0.0001
+    beta_end: 0.02
+    num_diffusion_timesteps: 1000
+    mask_schedule_sig: 3
+
+sampling:
+    batch_size: 20
+    last_only: True
+    lambda_: 0.
+    dump_arr: True
+    log_loss: True
+    dump_arr: True
+    guidance_weight: 0.0
