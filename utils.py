@@ -24,6 +24,32 @@ def dict2namespace(config):
     return namespace
 
 
+def conditional_no_grad(param_name):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            use_grad = kwargs.get(param_name, False)
+            if use_grad:
+                return func(*args, **kwargs)
+            else:
+                with torch.no_grad():
+                    return func(*args, **kwargs)
+        return wrapper
+    
+    return decorator
+
+
+def plot_iteration(x, i, freq=100):
+    if type(x) is torch.Tensor:
+        x = x.cpu()
+
+    if i % freq == 0:
+        plt.imshow(x, vmin=-2, vmax=2)
+        plt.title(f'Iteration {i}')
+        clear_output(wait=True)
+        plt.show()
+
+
 def plot_field(X, vmin=-2, vmax=2, figsize=(5,5), colorbar=True, cmap="twilight"):
     X = X.cpu() if type(X) is torch.Tensor else X
     fig, axes = plt.subplots(1, 1, figsize=figsize)
