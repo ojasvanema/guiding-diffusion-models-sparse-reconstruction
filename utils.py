@@ -4,9 +4,9 @@ import numpy as np
 import torch
 import random
 from scipy.interpolate import griddata
+from functools import wraps
 import cv2
 from typing import Optional, Union
-import ot as pot
 from functools import partial
 import math
 from LSIM.distance_model import DistanceModel
@@ -63,8 +63,8 @@ def plot_two(X, Y, vmin=-2, vmax=2, colorbar=False, figsize=(10, 5)):
     Y = Y.cpu() if type(Y) is torch.Tensor else Y
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
-    im0 = axes[0].imshow(X, vmin=vmin, vmax=vmax)
-    im1 = axes[1].imshow(Y, vmin=vmin, vmax=vmax)
+    im0 = axes[0].imshow(X, cmap="twilight", vmin=vmin, vmax=vmax)
+    im1 = axes[1].imshow(Y, cmap="twilight", vmin=vmin, vmax=vmax)
     if colorbar:
         fig.colorbar(im0, ax=axes[0])
         fig.colorbar(im1, ax=axes[1])
@@ -77,9 +77,9 @@ def plot_three(X, Y, Z, vmin=-2, vmax=2, colorbar=False, figsize=(15, 5)):
     Z = Z.cpu() if type(Z) is torch.Tensor else Z
 
     fig, axes = plt.subplots(1, 3, figsize=figsize)
-    im0 = axes[0].imshow(X, vmin=vmin, vmax=vmax)
-    im1 = axes[1].imshow(Y, vmin=vmin, vmax=vmax)
-    im2 = axes[2].imshow(Z, vmin=vmin, vmax=vmax)
+    im0 = axes[0].imshow(X, cmap="twilight", vmin=vmin, vmax=vmax)
+    im1 = axes[1].imshow(Y, cmap="twilight", vmin=vmin, vmax=vmax)
+    im2 = axes[2].imshow(Z, cmap="twilight", vmin=vmin, vmax=vmax)
    
     if colorbar:
         fig.colorbar(im0, ax=axes[0])
@@ -149,7 +149,7 @@ def l2_loss_fn(x, y):
 
 
 class StdScaler(object):
-    def __init__(self, mean, std):
+    def __init__(self, mean=0.0, std=4.7852):
         self.mean = mean
         self.std = std
 
@@ -163,21 +163,7 @@ class StdScaler(object):
         return self.std
     
 
-def interpolate_points(image, perc=0, ids=None, method="nearest"):
-    # N, _ = image.shape 
-    # if ids is None: 
-    #     sampled_ids = random.sample(range(N**2), int(N**2 * perc))
-    # else:
-    #     sampled_ids = ids
-
-    # vals = image.reshape(N**2)[sampled_ids]
-    # ids = [[x // N, x % N] for x in sampled_ids]    
-    # grid_x, grid_y = np.mgrid[0:N, 0:N]
-    # grid_z = griddata(ids, vals, (grid_x, grid_y), method=method, fill_value=0) # linear, cubic, nearest
-
-    # return torch.tensor(grid_z)
-
-    # -- Horrible implementation of periodic interpolation --        
+def interpolate_points(image, ids=None, method="nearest"):
     N, _ = image.shape
     vals = np.tile(image.reshape(N**2)[ids], 9)
     ids = \
@@ -207,9 +193,9 @@ def interpolate_dataset(dataset, perc, method="nearest"):
     for i in range(n_samples):
         sampled_ids[i] = np.array(random.sample(range(N**2), n_points))
 
-        X_vals[i, 0] = interpolate_points(X_vals[i, 0], perc=perc, ids=sampled_ids[i], method=method)
-        X_vals[i, 1] = interpolate_points(X_vals[i, 1], perc=perc, ids=sampled_ids[i], method=method)
-        X_vals[i, 2] = interpolate_points(X_vals[i, 2], perc=perc, ids=sampled_ids[i], method=method)
+        X_vals[i, 0] = interpolate_points(X_vals[i, 0], ids=sampled_ids[i], method=method)
+        X_vals[i, 1] = interpolate_points(X_vals[i, 1], ids=sampled_ids[i], method=method)
+        X_vals[i, 2] = interpolate_points(X_vals[i, 2], ids=sampled_ids[i], method=method)
 
     return X_vals, sampled_ids
 
@@ -283,25 +269,6 @@ def diffuse_mask(value_ids, A=1, sig=0.044, search_dist=-1, N=256, tol=1e-6):
             min_search_steps += 1
         search_dist = min_search_steps
 
-    """
-    for sid in value_ids:
-        i = sid // N
-        j = sid % N
-        x0 = X[i]
-        y0 = Y[j]
-
-        for ii in range(-search_dist, search_dist):
-            for jj in range(-search_dist, search_dist):
-                x = x0 + ii * dx
-                y = y0 + jj * dy
-
-                gi = (i + ii) % N
-                gj = (j + jj) % N
-
-                grid[gi, gj] = max(grid[gi,gj], gauss(x0, y0, x, y))
-
-    return grid
-    """
 
     gaussian = np.zeros((search_dist*2 + 1, search_dist*2 + 1))
     x0 = y0 = search_dist * dx
@@ -340,74 +307,25 @@ def diffuse_mask(value_ids, A=1, sig=0.044, search_dist=-1, N=256, tol=1e-6):
             else:
                 gjub = S
 
-        # print("Search dist:", search_dist)
-        # print(i, j)
-        # print(ilb, iub, jlb, jub)
-        # print(gilb, giub, gjlb, gjub)
-
         grid[ilb:iub, jlb:jub] = np.fmax(gaussian[gilb:giub, gjlb:gjub], grid[ilb:iub, jlb:jub])
 
     return grid
 
 
-# https://github.com/atong01/conditional-flow-matching/blob/c25e1918a80dfacbe9475c055d61ac997f28262a/torchcfm/optimal_transport.py#L218
-def wasserstein(
-    x0: torch.Tensor,
-    x1: torch.Tensor,
-    method: Optional[str] = None,
-    reg: float = 0.05,
-    power: int = 2,
-    **kwargs,
-) -> float:
-    """Compute the Wasserstein (1 or 2) distance (wrt Euclidean cost) between a source and a target
-    distributions.
+def gen_gaussian_masks(sparse_ids, sig=0.038):
+    gaussian_masks = torch.zeros(len(sparse_ids), 3, 256, 256)
+        
+    for i in range(len(sparse_ids)):
+        mask = diffuse_mask(sparse_ids[i], A=1, sig=sig)
+        gaussian_masks[i] = torch.tensor(mask, dtype=torch.float).unsqueeze(0).repeat(3, 1, 1)
 
-    Parameters
-    ----------
-    x0 : Tensor, shape (bs, *dim)
-        represents the source minibatch
-    x1 : Tensor, shape (bs, *dim)
-        represents the source minibatch
-    method : str (default : None)
-        Use exact Wasserstein or an entropic regularization
-    reg : float (default : 0.05)
-        Entropic regularization coefficients
-    power : int (default : 2)
-        power of the Wasserstein distance (1 or 2)
-    Returns
-    -------
-    ret : float
-        Wasserstein distance
-    """
-    assert power == 1 or power == 2
-    # ot_fn should take (a, b, M) as arguments where a, b are marginals and
-    # M is a cost matrix
-    if method == "exact" or method is None:
-        ot_fn = pot.emd2
-    elif method == "sinkhorn":
-        ot_fn = partial(pot.sinkhorn2, reg=reg)
-    else:
-        raise ValueError(f"Unknown method: {method}")
-
-    a, b = pot.unif(x0.shape[0]), pot.unif(x1.shape[0])
-    if x0.dim() > 2:
-        x0 = x0.reshape(x0.shape[0], -1)
-    if x1.dim() > 2:
-        x1 = x1.reshape(x1.shape[0], -1)
-    M = torch.cdist(x0, x1)
-    if power == 2:
-        M = M**2
-    ret = ot_fn(a, b, M.detach().cpu().numpy(), numItermax=int(1e7))
-    if power == 2:
-        ret = math.sqrt(ret)
-    return ret
+    return gaussian_masks
 
 
 def fix_randomness(seed=1234):
     torch.torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
-
 
 
 lsim_model = DistanceModel(baseType="lsim", isTrain=False, useGPU=True)
