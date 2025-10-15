@@ -9,7 +9,7 @@ This is code is the implementation of the framework presented in our article <b>
 
 <img src="./figures/masked_diffusion_sketch.png" />
 
-The repository currently contains the network and training codes for the 2D scenario (3D scenario coming soon).  
+The repository currently contains the network and training codes for the 2D scenario (3D scenario coming soon). Moreover, we created the notebook `examples.ipynb` containing a walkthrough of how to generate samples from the pretrained diffusion model, and how to use the masked diffussion method to reconstruct flow fields from sparse measurements.
 
 
 ## Model
@@ -25,6 +25,3 @@ The training of these models was done using the `trainer.py` script. Run `python
 ```
 python trainer.py --epochs 1000 --ndata 3000 --batch 5 --lr 1e-4 --eq_res 1e-5 --gamma 0.98 --last_lr 1e-5 --device 0 --loss_m l2 --method ConFIG
 ```
-
-## Sampling examples
-Examples of how to run the code are coming soon.
