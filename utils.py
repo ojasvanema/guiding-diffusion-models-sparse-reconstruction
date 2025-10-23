@@ -71,7 +71,7 @@ def plot_two(X, Y, vmin=-2, vmax=2, colorbar=False, figsize=(10, 5)):
     plt.show()
 
 
-def plot_three(X, Y, Z, vmin=-2, vmax=2, colorbar=False, figsize=(15, 5)):
+def plot_three(X, Y, Z, vmin=-2, vmax=2, colorbar=False, figsize=(15, 5), titles=None):
     X = X.cpu() if type(X) is torch.Tensor else X
     Y = Y.cpu() if type(Y) is torch.Tensor else Y
     Z = Z.cpu() if type(Z) is torch.Tensor else Z
@@ -86,6 +86,11 @@ def plot_three(X, Y, Z, vmin=-2, vmax=2, colorbar=False, figsize=(15, 5)):
         fig.colorbar(im1, ax=axes[1])
         fig.colorbar(im2, ax=axes[2])
     
+    if not titles is None:
+        axes[0].set_title(titles[0])
+        axes[1].set_title(titles[1])
+        axes[2].set_title(titles[2])
+
     plt.show()
 
 

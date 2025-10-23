@@ -33,20 +33,16 @@ class Diffusion():
 
 
     @conditional_no_grad('grad')
-    def ddpm(self, x_inp, model, t_start=None, plot_prog=False, grad=False):
-        n = x_inp.size(0)
+    def ddpm(self, x, model, t_start=None, plot_prog=False, grad=False):
+        n = x.size(0)
         t_start = self.num_timesteps if t_start is None else t_start
-
-        x     = x_inp[:, 0:3]
-        Re_ch = x_inp[:, 3:4]
 
         for i in reversed(range(t_start)):
             t = (torch.ones(n) * i).to(x.device)
             b = self.betas[i]
             a = self.alphas[i]
             a_b = self.alphas_b[i]
-            model_inp = torch.cat((x, Re_ch), dim=1) 
-            e = model(model_inp, t)
+            e = model(x, t)
 
             x = (1 / a.sqrt()) * (x - (b / (1 - a_b).sqrt()) * e) 
 
