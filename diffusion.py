@@ -37,8 +37,10 @@ class Diffusion():
         n = x.size(0)
         t_start = self.num_timesteps if t_start is None else t_start
 
+        t = (torch.zeros(n)).to(x.device)
+
         for i in reversed(range(t_start)):
-            t = (torch.ones(n) * i).to(x.device)
+            t[:] = i
             b = self.betas[i]
             a = self.alphas[i]
             a_b = self.alphas_b[i]
