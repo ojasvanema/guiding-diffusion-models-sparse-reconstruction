@@ -3,7 +3,7 @@
 <img src="./figures/example_reconstruction.png" />
 
 <p align="center">
-This is code is the implementation of the framework presented in our article <b>"Guiding diffusion models to reconstruct flow fields from sparse data"</b> <br> [<a href="__blank">Arxiv</a>]
+This is code is the implementation of the framework presented in our article <b>"Guiding diffusion models to reconstruct flow fields from sparse data"</b> <br> [<a href="https://arxiv.org/abs/2510.19971v1">Arxiv</a>]
 </p>
 
 
