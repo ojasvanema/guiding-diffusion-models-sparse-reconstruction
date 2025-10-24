@@ -1,15 +1,15 @@
-# Diffusion based sparse reconstruction
+# Diffusion-based sparse reconstruction
 
 <img src="./figures/example_reconstruction.png" />
 
 <p align="center">
-This is code is the implementation of the framework presented in our article <b>"Guiding diffusion models to reconstruct flow fields from sparse data"</b> <br> [<a href="https://arxiv.org/abs/2510.19971v1">Arxiv</a>]
+This code is the implementation of the framework presented in our article <b>"Guiding diffusion models to reconstruct flow fields from sparse data"</b> <br> [<a href="https://arxiv.org/abs/2510.19971v1">Arxiv</a>]
 </p>
 
 
 <img src="./figures/masked_diffusion_sketch.png" />
 
-The repository currently contains the network and training codes for the 2D scenario (3D scenario coming soon). Moreover, we created the notebook `examples.ipynb` containing a walkthrough of how to generate samples from the pretrained diffusion model, and how to use the masked diffussion method to reconstruct flow fields from sparse measurements.
+The repository currently contains the network and training codes for the 2D scenario (3D scenario coming soon). Moreover, we created the notebook `examples.ipynb` containing a walkthrough of how to generate samples from the pretrained diffusion model, and how to use the masked diffusion method to reconstruct flow fields from sparse measurements.
 
 
 ## Model
@@ -17,11 +17,11 @@ The architecture of the U-net network behind the model can be found in `networks
 
 
 ## Dataset
-The used dataset can be downloaded on the [repo](https://github.com/BaratiLab/Diffusion-based-Fluid-Super-resolution) of Shu et al. or through this [link](https://figshare.com/ndownloader/files/39181919). Then, it should be placed under the `data` folder, such that it can be found by the `KolmogorovFlowDataset` class from `datasets.py`. This class organizes the dataset in samples of 3 contiguous timesteps, which are used to train the models.
+The used dataset can be downloaded from the [repo](https://github.com/BaratiLab/Diffusion-based-Fluid-Super-resolution) of Shu et al. or through this [link](https://figshare.com/ndownloader/files/39181919). Then, it should be placed under the `data` folder, such that it can be found by the `KolmogorovFlowDataset` class from `datasets.py`. This class organizes the dataset into samples of 3 contiguous timesteps, which are used to train the models.
 
 
 ## Training
-The training of these models was done using the `trainer.py` script. Run `python trainer.py --help` to visualize all the possible parameters, one example command can be:
+The training of these models was done using the `trainer.py` script. Run `python trainer.py --help` to visualize all the possible parameters. One example command can be:
 ```
 python trainer.py --epochs 1000 --ndata 3000 --batch 5 --lr 1e-4 --eq_res 1e-5 --gamma 0.98 --last_lr 1e-5 --device 0 --loss_m l2 --method ConFIG
 ```
