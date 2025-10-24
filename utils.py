@@ -333,7 +333,7 @@ def fix_randomness(seed=1234):
     np.random.seed(seed)
 
 
-lsim_model = DistanceModel(baseType="lsim", isTrain=False, useGPU=True)
+lsim_model = DistanceModel(baseType="lsim", isTrain=False, useGPU=torch.cuda.is_available())
 lsim_model.load("LSIM/LSiM.pth")
 
 def LSiM_distance(A, B):
