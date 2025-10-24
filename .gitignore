@@ -1,5 +1,4 @@
 data/
-pretrained_weights/
 __pycache__
 runs/
 out*
