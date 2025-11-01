@@ -83,7 +83,7 @@ def parse_args():
     parser.add_argument('--ndata', default=20000, type=int, help='Dataset size')
     parser.add_argument('--nmulti', default=1, type=int, help='Number of steps over which to perform multiConFIG method')
     parser.add_argument('--last_lr', default=1e-5, type=float, help='Last lr at the end of the scheduler.')
-    parser.add_argument('--validation', default=True, type=bool, help='Compute validation')
+    parser.add_argument('--validation', default=False, type=bool, help='Compute validation')
     parser.add_argument('--checkpoint', default="", type=str, help='Path of checkpoint from where to continue training.')
     parser.add_argument('--length', default=0, type=int, help='Method to compute length of ConFIG gradient. 0: proj, 1: uniProj')
     parser.add_argument('--seed', default=-1, type=int, help='Seed value')
@@ -316,23 +316,21 @@ def train(config, train_dataset, scaler, args=None):
     for epoch in range(start_epoch, args.epochs):
         residual_loss = 0.0
         mse_loss      = 0.0
-        for i, data in enumerate(train_dataloader):
+        from tqdm import tqdm
+        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.epochs}", leave=False)
+        for i, data in enumerate(pbar):
             optimizer.zero_grad()
             model.train()
             x = data.to(config.device)
-            if x.dim() != 4 or x.shape[1] != config.model.in_channels or x.shape[2] != config.data.image_size or x.shape[3] != config.data.image_size:
-                print(f"DEBUG: batch x.shape = {tuple(x.shape)}; expected (B, {config.model.in_channels}, {config.data.image_size}, {config.data.image_size})")
-                raise RuntimeError(
-                    f"Input tensor shape mismatch. Got {tuple(x.shape)}, expected channels={config.model.in_channels}, image_size={config.data.image_size}."
-                )
             e_loss, res_loss = train_step(
                 model, diffusion, x, 
                 scaler, optimizer, loss_m, residual_op,
                 config_operator=config_operator, eq_res=args.eq_res, nmulti=args.nmulti
             )
             residual_loss += res_loss
-            mse_loss      += e_loss
-            log(f"[{epoch}, {i}]: eq_res {res_loss:.4f}, mse {e_loss:.4f}")
+            mse_loss += e_loss
+            pbar.set_postfix({"MSE": f"{e_loss:.4f}", "Eq_Res": f"{res_loss:.4f}"})
+
 
         if optimizer.param_groups[0]['lr'] > args.last_lr:
             scheduler.step()
@@ -368,6 +366,7 @@ def train(config, train_dataset, scaler, args=None):
                     'val_loss': val_loss,
                 }, str(best_path))
                 log(f"New best model saved: {best_path}")
+        log(f"Epoch {epoch+1}: mean MSE={mse_loss/len(train_dataloader):.4f}, " f"mean Eq_Res={residual_loss/len(train_dataloader):.4f}")
 
         writer.add_scalar('MSE error', mse_loss / len(train_dataloader), epoch)
         writer.add_scalar('Vorticity eq residual', residual_loss / len(train_dataloader), epoch)
