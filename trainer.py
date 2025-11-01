@@ -1,3 +1,4 @@
+# trainer.py
 import yaml
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ from utils import *
 from diffusion import Diffusion
 from networks import Model
 from datasets import KolmogorovFlowDataset
+from lhc_dataset import ChannelDataset
 from residuals import ResidualOp
 
 
@@ -50,14 +52,16 @@ def load_config(args):
 
 def define_folder(folder=None):
     base_path = Path("runs")
+    # Ensure the "runs" folder exists
+    if not base_path.exists():
+        base_path.mkdir(parents=True, exist_ok=True)
     if folder:
         os.chdir(base_path / str(folder))
         return
-    
     for i in range(1000):
         new_fold = base_path / str(i).zfill(3)
         if not new_fold.exists():
-            os.mkdir(new_fold)
+            new_fold.mkdir(parents=True, exist_ok=True)
             os.chdir(new_fold)
             return new_fold
 
@@ -73,13 +77,15 @@ def parse_args():
     parser.add_argument('--dataset', default=1, type=int, help='What dataset to use for training. 1: shu, 0: group dataset')
     parser.add_argument('--eq_res', default=-1, type=float, help='Coefficient of the Vorticity equation residual contribution. If -1, means dynamic')
     parser.add_argument('--method', default="PINN", type=str, help='Training method. Options: std, PINN, ConFIG, multiConFIG')
-    parser.add_argument('--ndata', default=1000, type=int, help='Dataset size')
+    parser.add_argument('--ndata', default=20000, type=int, help='Dataset size')
     parser.add_argument('--nmulti', default=1, type=int, help='Number of steps over which to perform multiConFIG method')
     parser.add_argument('--last_lr', default=1e-5, type=float, help='Last lr at the end of the scheduler.')
     parser.add_argument('--validation', default=True, type=bool, help='Compute validation')
     parser.add_argument('--checkpoint', default="", type=str, help='Path of checkpoint from where to continue training.')
     parser.add_argument('--length', default=0, type=int, help='Method to compute length of ConFIG gradient. 0: proj, 1: uniProj')
     parser.add_argument('--seed', default=-1, type=int, help='Seed value')
+    parser.add_argument('--lhc', default=-1, type=int,
+                        help='Train on LHC dataset. Use 0,1,2 for ECAL/HCAL/Tracks. -1 = use Kolmogorov dataset.')
     
     args = parser.parse_args()
     
@@ -101,7 +107,6 @@ def set_logger():
 
 def log(s):
     global LOGGER
-    # print(s)
     LOGGER.info(s)
   
 
@@ -114,6 +119,7 @@ def compute_validation(model, diffusion, dataset, device, residual_op, noise=Non
             print("Sample", i)
             x_noise = noise[i].unsqueeze(0).to(device)
             y_pred = diffusion.ddpm(x_noise, model, 1000, plot_prog=False)
+            # dataset.scaler must exist (IdentityScaler provided for LHC)
             res, _ = residual_op(dataset.scaler.inverse(y_pred))    
             l1_loss[i] = torch.mean(abs(res))
 
@@ -186,21 +192,10 @@ def diffusion_ConFIG_step(model, diffusion, y, scaler, optimizer, loss_m, residu
     mse_loss.backward(retain_graph=True)
     grads_1 = get_gradient_vector(model, y.device)
     optimizer.zero_grad()
-
-    # with torch.no_grad():
-    #     coef = mse_loss / residual_loss
-    # residual_loss = residual_loss * coef
     
     residual_loss.backward()
     grads_2 = get_gradient_vector(model, y.device)
 
-    # with torch.no_grad():
-    #     if kargs["eq_res"] < 0: # Dynamic coeff 
-    #         grads_2 = grads_2 * (grads_1.norm() / grads_2.norm()) 
-    #     else:
-    #         grads_2 = grads_2 * kargs["eq_res"]
-
-    # kargs["config_operator"].update_gradient(model, torch.stack([grads_1, grads_2], 0))
     kargs["config_operator"].update_gradient(model, [grads_1, grads_2])
     optimizer.step()
     
@@ -261,7 +256,8 @@ def train(config, train_dataset, scaler, args=None):
     scheduler = ExponentialLR(optimizer, gamma=args.gamma)
     start_epoch = 0
 
-    validation_noise = torch.randn((10, 3, 256, 256))
+    # validation_noise adapts to configured channels & size
+    validation_noise = torch.randn((10, config.model.in_channels, config.data.image_size, config.data.image_size)).to(config.device)
 
     if args.checkpoint:
         cp = torch.load(args.checkpoint, weights_only=True)
@@ -276,7 +272,18 @@ def train(config, train_dataset, scaler, args=None):
         1: UniProjectionLength()
     }[args.length])
 
+    # default residual operator
     residual_op = ResidualOp(device=config.device)
+
+    # If LHC mode, replace PDE residual operator with a dummy that returns zeros
+    if args is not None and getattr(args, "lhc", -1) != -1:
+        class DummyResidual:
+            def __init__(self, device):
+                self.device = device
+            def __call__(self, x):
+                return torch.zeros_like(x), None
+        residual_op = DummyResidual(config.device)
+        log("Using DummyResidual (LHC mode) — PDE residual losses disabled.")
 
     loss_m = {
         "l1": lambda x: torch.mean(torch.abs(x)),
@@ -290,14 +297,34 @@ def train(config, train_dataset, scaler, args=None):
         "multiConFIG": diffusion_multi_ConFIG_step
     }[args.method]
 
+    # --- NEW: checkpoint & best-model tracking (project-level saved_models) ---
+    best_val_loss = float('inf')
+
+    # Force a single saved_models directory at the project root (same folder as trainer.py).
+    project_root = Path(__file__).resolve().parent
+    saved_models_dir = project_root / "saved_models"
+    epochs_dir = saved_models_dir / "epochs"
+    best_dir = saved_models_dir / "best"
+    os.makedirs(epochs_dir, exist_ok=True)
+    os.makedirs(best_dir, exist_ok=True)
+    log(f"Saving all model checkpoints to: {saved_models_dir}")
+    # --------------------------------------------
+
     for epoch in range(start_epoch, args.epochs):
-        residual_loss = 0
-        mse_loss      = 0
+        residual_loss = 0.0
+        mse_loss      = 0.0
 
         for i, data in enumerate(train_dataloader):
             optimizer.zero_grad()
             model.train()
             x = data.to(config.device)
+
+            # sanity check — fail early with clear error if channel/size mismatch
+            if x.dim() != 4 or x.shape[1] != config.model.in_channels or x.shape[2] != config.data.image_size or x.shape[3] != config.data.image_size:
+                print(f"DEBUG: batch x.shape = {tuple(x.shape)}; expected (B, {config.model.in_channels}, {config.data.image_size}, {config.data.image_size})")
+                raise RuntimeError(
+                    f"Input tensor shape mismatch. Got {tuple(x.shape)}, expected channels={config.model.in_channels}, image_size={config.data.image_size}."
+                )
 
             e_loss, res_loss = train_step(
                 model, diffusion, x, 
@@ -310,6 +337,7 @@ def train(config, train_dataset, scaler, args=None):
             
             log(f"[{epoch}, {i}]: eq_res {res_loss:.4f}, mse {e_loss:.4f}")
 
+        # scheduler step
         if optimizer.param_groups[0]['lr'] > args.last_lr:
             scheduler.step()
             log(f"(Scheduler) new lr: {optimizer.param_groups[0]['lr']}")
@@ -317,24 +345,39 @@ def train(config, train_dataset, scaler, args=None):
             optimizer.param_groups[0]['lr'] = args.last_lr
             log(f"(Scheduler) last lr: {optimizer.param_groups[0]['lr']}")
 
-        if (epoch + 1) % 25 == 0:
-            log(f"Saving model {epoch + 1}")
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'residual_loss': residual_loss,
-                'mse_loss': mse_loss,
-            }, f"checkpoint{epoch+1}.pt")
+        # Save epoch checkpoint into project-level saved_models/epochs
+        ckpt_epochs_path = epochs_dir / f"checkpoint_epoch{epoch+1}.pt"
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'residual_loss': residual_loss,
+            'mse_loss': mse_loss,
+        }, str(ckpt_epochs_path))
+        log(f"Saved epoch checkpoint: {ckpt_epochs_path}")
 
-            if args.validation:
-                log("Computing validation...")
-                val_loss = compute_validation(model, diffusion, train_dataset, config.device, residual_op, noise=validation_noise)
-                writer.add_scalar('Val - l1 residual loss', val_loss, epoch)
-                log(f"Validation loss: {val_loss}")
+        # Validation (only when requested)
+        if (epoch + 1) % 1 == 0 and args.validation:  # run validation every epoch
+            log("Computing validation...")
+            val_loss = compute_validation(model, diffusion, train_dataset, config.device, residual_op, noise=validation_noise)
+            writer.add_scalar('Val - l1 residual loss', val_loss, epoch)
+            log(f"Validation loss: {val_loss}")
 
-        writer.add_scalar('MSE error', e_loss / len(train_dataloader), epoch)
+            # Save best model by val metric to project-level saved_models/best
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_path = best_dir / "best_model.pt"
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'val_loss': val_loss,
+                }, str(best_path))
+                log(f"New best model saved: {best_path}")
+
+        writer.add_scalar('MSE error', mse_loss / len(train_dataloader), epoch)
         writer.add_scalar('Vorticity eq residual', residual_loss / len(train_dataloader), epoch)
         
         if epoch % 5 == 0: writer.flush()
@@ -354,7 +397,46 @@ def main():
     log(f"Filename: {__file__}")
 
     log("Loading dataset...")
-    dataset = KolmogorovFlowDataset(data_folder="../../data", shu=bool(args.dataset), seed=1234, size=args.ndata)
+    if args.lhc != -1:
+        print("LHC mode detected → forcing model to single-channel and using ChannelDataset")
+
+        # Force model to accept 1 input channel and produce 1 output channel before Model(config) is instantiated
+        try:
+            config.model.in_channels = 1
+            config.model.out_ch = 1
+        except Exception:
+            setattr(config.model, "in_channels", 1)
+            setattr(config.model, "out_ch", 1)
+        try:
+            config.data.image_size = 256
+        except Exception:
+            setattr(config.data, "image_size", 256)
+
+        # instantiate LHC dataset (absolute path)
+        hdf5_path = "/home/psquare_quantum/Desktop/Diff/guided_diffusion_models_sparse_reconstructions/guiding-diffusion-models-sparse-reconstruction/quark-gluon_data-set_n139306.hdf5"
+        dataset = ChannelDataset(
+            hdf5_file=hdf5_path,
+            channel_index=args.lhc,
+            max_samples=args.ndata,
+            image_size=config.data.image_size
+        )
+
+        # Attach a minimal scaler API so existing calls to dataset.scaler.inverse(...) work
+        class IdentityScaler:
+            def inverse(self, x): return x
+        dataset.scaler = IdentityScaler()
+        scaler = dataset.scaler
+
+    else:
+        # Original CFD dataset (unchanged)
+        dataset = KolmogorovFlowDataset(
+            data_folder="../../data",
+            shu=bool(args.dataset),
+            seed=1234,
+            size=args.ndata,
+        )
+        scaler = dataset.scaler
+
     # train_dataset, _ = dataset.split()
     train_dataset = dataset
 
@@ -367,7 +449,7 @@ def main():
     fix_randomness(args.seed)
     log(f"Training seed: {args.seed}")
 
-    train(config, train_dataset, dataset.scaler, args=args)
+    train(config, train_dataset, scaler, args=args)
 
     time_end = time.time()
     log(f"Training took {time_end - time_start}")
