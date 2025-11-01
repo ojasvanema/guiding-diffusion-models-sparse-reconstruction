@@ -5,3 +5,5 @@ out*
 venv
 saved_models/
 quark-gluon_data-set_n139306.hdf5
+events.out.tfevents.1762016599.dell-Precision-5860-Tower.253067.0
+saved_models_HCAL/

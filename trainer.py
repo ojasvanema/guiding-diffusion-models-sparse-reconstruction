@@ -1,4 +1,3 @@
-# trainer.py
 import yaml
 import os
 from pathlib import Path
@@ -30,11 +29,18 @@ LOGGER = None
 
 def load_config(args):
     if bool(args.dataset):
-        config_path = "../../configs/kmflow_re1000_rs256.yml"
+        cfg_name = "configs/kmflow_re1000_rs256.yml"
     else:
-        config_path = "../../configs/kmflow_re1000_rs160.yml"
+        cfg_name = "configs/kmflow_re1000_rs160.yml"
 
-    with open(Path(config_path), 'r') as f:
+    project_root = Path(__file__).resolve().parent
+    config_path = project_root / cfg_name
+
+    import os
+    print("Current working directory:", os.getcwd())
+    print("Resolved config path:", config_path)
+
+    with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     config = dict2namespace(config)
 
@@ -44,26 +50,23 @@ def load_config(args):
         device = torch.device('cpu')
 
     seed = 1234
-
     config.device = device
     config.seed = seed
     return config
 
 
 def define_folder(folder=None):
-    base_path = Path("runs")
-    # Ensure the "runs" folder exists
-    if not base_path.exists():
-        base_path.mkdir(parents=True, exist_ok=True)
-    if folder:
-        os.chdir(base_path / str(folder))
-        return
-    for i in range(1000):
-        new_fold = base_path / str(i).zfill(3)
-        if not new_fold.exists():
-            new_fold.mkdir(parents=True, exist_ok=True)
-            os.chdir(new_fold)
-            return new_fold
+    """
+    Previously created 'runs' subfolders.
+    Now it simply ensures model/log directories exist and returns their path.
+    """
+    project_root = Path(__file__).resolve().parent
+    save_root = project_root / "saved_models_HCAL"
+    log_root = save_root / "logs"
+    os.makedirs(log_root, exist_ok=True)
+
+    # Do not change working directory anymore.
+    return log_root
 
 
 def parse_args():
@@ -88,27 +91,62 @@ def parse_args():
                         help='Train on LHC dataset. Use 0,1,2 for ECAL/HCAL/Tracks. -1 = use Kolmogorov dataset.')
     
     args = parser.parse_args()
-    
     params = {}
     params.update(vars(args))
     log(f"Params: {params}")
-
     return args
 
 
-def set_logger():
+import sys
+from datetime import datetime
+
+def set_logger(log_dir: str = "./", log_name: str = "run.log", verbose: bool = True):
+    """Configure global logger to print to both file and stdout (e.g., tmux)."""
     global LOGGER
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"{timestamp}_{log_name}")
 
     LOGGER = logging.getLogger()
-    LOGGER.addHandler(logging.StreamHandler())
     LOGGER.setLevel(logging.INFO)
-    LOGGER.addHandler(logging.FileHandler('./run.log'))
+    for h in list(LOGGER.handlers):
+        LOGGER.removeHandler(h)
+
+    fh = logging.FileHandler(log_path)
+    fh.setLevel(logging.INFO)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(logging.INFO)
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    fh.setFormatter(formatter)
+    sh.setFormatter(formatter)
+
+    LOGGER.addHandler(fh)
+    if verbose:
+        LOGGER.addHandler(sh)
+
+    LOGGER.info(f"Logger initialized → writing to {log_path}")
 
 
-def log(s):
-    global LOGGER
-    LOGGER.info(s)
-  
+def log(msg: str, level: str = "info"):
+    if LOGGER is None:
+        print(msg)
+        return
+    msg = str(msg)
+    if level == "info":
+        LOGGER.info(msg)
+    elif level == "warning":
+        LOGGER.warning(msg)
+    elif level == "error":
+        LOGGER.error(msg)
+    elif level == "debug":
+        LOGGER.debug(msg)
+    else:
+        LOGGER.info(msg)
+
 
 def compute_validation(model, diffusion, dataset, device, residual_op, noise=None):
     model.eval()
@@ -119,10 +157,8 @@ def compute_validation(model, diffusion, dataset, device, residual_op, noise=Non
             print("Sample", i)
             x_noise = noise[i].unsqueeze(0).to(device)
             y_pred = diffusion.ddpm(x_noise, model, 1000, plot_prog=False)
-            # dataset.scaler must exist (IdentityScaler provided for LHC)
             res, _ = residual_op(dataset.scaler.inverse(y_pred))    
             l1_loss[i] = torch.mean(abs(res))
-
     model.train()
     return np.mean(l1_loss)
 
@@ -130,28 +166,23 @@ def compute_validation(model, diffusion, dataset, device, residual_op, noise=Non
 def diffusion_standard_step(model, diffusion, y, scaler, optimizer, loss_m, residual_op, **kargs):
     batch_size = y.shape[0]
     t = torch.randint(0, diffusion.num_timesteps, size=(batch_size,), device=y.device)
-
     x_t, noise = diffusion.forward(y, t)
     e_pred = model(x_t, t)
     mse_loss = (noise - e_pred).square().mean()
-
     mse_loss.backward()
     optimizer.step()
 
-    # Compute res_loss for metrics comparison
     with torch.no_grad():
         a_b = diffusion.alphas_b[t].view(batch_size, 1, 1, 1)
         x0_pred = (x_t - (1 - a_b).sqrt() * e_pred) / a_b.sqrt()
         eq_residual, _ = residual_op(scaler.inverse(x0_pred))
         eq_res_m = loss_m(eq_residual)
-
     return mse_loss, eq_res_m
 
 
 def diffusion_PINN_step(model, diffusion, y, scaler, optimizer, loss_m, residual_op, **kargs):
     batch_size = y.shape[0]
     t = torch.randint(0, diffusion.num_timesteps, size=(batch_size,), device=y.device)
-
     x_t, noise = diffusion.forward(y, t)
     e_pred = model(x_t, t)
     mse_loss = (noise - e_pred).square().mean()
@@ -159,7 +190,6 @@ def diffusion_PINN_step(model, diffusion, y, scaler, optimizer, loss_m, residual
     a_b = diffusion.alphas_b[t].view(batch_size, 1, 1, 1)
     x0_pred = (x_t - (1 - a_b).sqrt() * e_pred) / a_b.sqrt()
     eq_residual, _ = residual_op(scaler.inverse(x0_pred))
-
     eq_res_m = loss_m(eq_residual)
 
     with torch.no_grad():
@@ -169,21 +199,17 @@ def diffusion_PINN_step(model, diffusion, y, scaler, optimizer, loss_m, residual
             coef = kargs["eq_res"]
 
     loss = mse_loss + coef * eq_res_m
-
     loss.backward()
     optimizer.step()
-
     return mse_loss, eq_res_m
 
 
 def diffusion_ConFIG_step(model, diffusion, y, scaler, optimizer, loss_m, residual_op, **kargs):
     batch_size = y.shape[0]
     t = torch.randint(0, diffusion.num_timesteps, size=(batch_size,), device=y.device)
-
     x_t, noise = diffusion.forward(y, t)
     e_pred = model(x_t, t)
     mse_loss = (noise - e_pred).square().mean()
-
     a_b = diffusion.alphas_b[t].view(batch_size, 1, 1, 1)
     x0_pred = (x_t - (1 - a_b).sqrt() * e_pred) / a_b.sqrt()
     eq_residual, _ = residual_op(scaler.inverse(x0_pred))
@@ -192,13 +218,10 @@ def diffusion_ConFIG_step(model, diffusion, y, scaler, optimizer, loss_m, residu
     mse_loss.backward(retain_graph=True)
     grads_1 = get_gradient_vector(model, y.device)
     optimizer.zero_grad()
-    
     residual_loss.backward()
     grads_2 = get_gradient_vector(model, y.device)
-
     kargs["config_operator"].update_gradient(model, [grads_1, grads_2])
     optimizer.step()
-    
     return mse_loss, residual_loss_unscaled
 
 
@@ -206,39 +229,30 @@ def diffusion_multi_ConFIG_step(model, diffusion, y, scaler, optimizer, loss_m, 
     batch_size = y.shape[0]
     n_groups = kargs["nmulti"]
     gradiends = []
-
     group_size = diffusion.num_timesteps // n_groups
-
     mse_losses = np.zeros(n_groups)
     res_losses = np.zeros(n_groups)
 
     for i in range(n_groups):
         optimizer.zero_grad()
-        
         begin = group_size * i
         end   = group_size * (i + 1) if i < n_groups - 1 else diffusion.num_timesteps
         t = torch.randint(begin, end, size=(1,), device=y.device).repeat(batch_size)
-
         x_t, noise = diffusion.forward(y, t)
         e_pred = model(x_t, t)
         mse_loss = (noise - e_pred).square().mean()
         mse_losses[i] = mse_loss.item()
         retain_graph =  i < n_groups - 1
         mse_loss.backward(retain_graph=retain_graph)
-        
         grads = get_gradient_vector(model, y.device)
         gradiends.append(grads)
-
-        # Evaluating residual loss
         a_b = diffusion.alphas_b[t].view(batch_size, 1, 1, 1)
         x0_pred = (x_t - (1 - a_b).sqrt() * e_pred) / a_b.sqrt()
         eq_residual, _ = residual_op(scaler.inverse(x0_pred))
         residual_loss = loss_m(eq_residual)        
         res_losses[i] = residual_loss
-
     kargs["config_operator"].update_gradient(model, torch.stack(gradiends, 0))
     optimizer.step()
-    
     return np.mean(mse_losses), np.mean(res_losses)
 
 
@@ -249,14 +263,10 @@ def train(config, train_dataset, scaler, args=None):
 
     diffusion = Diffusion(config)
     writer = SummaryWriter(".")
-
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch, shuffle=True)
-
     optimizer = torch.optim.Adam(model.parameters(),lr=args.lr)
     scheduler = ExponentialLR(optimizer, gamma=args.gamma)
     start_epoch = 0
-
-    # validation_noise adapts to configured channels & size
     validation_noise = torch.randn((10, config.model.in_channels, config.data.image_size, config.data.image_size)).to(config.device)
 
     if args.checkpoint:
@@ -271,11 +281,8 @@ def train(config, train_dataset, scaler, args=None):
         0: ProjectionLength(),
         1: UniProjectionLength()
     }[args.length])
-
-    # default residual operator
     residual_op = ResidualOp(device=config.device)
 
-    # If LHC mode, replace PDE residual operator with a dummy that returns zeros
     if args is not None and getattr(args, "lhc", -1) != -1:
         class DummyResidual:
             def __init__(self, device):
@@ -297,47 +304,36 @@ def train(config, train_dataset, scaler, args=None):
         "multiConFIG": diffusion_multi_ConFIG_step
     }[args.method]
 
-    # --- NEW: checkpoint & best-model tracking (project-level saved_models) ---
     best_val_loss = float('inf')
-
-    # Force a single saved_models directory at the project root (same folder as trainer.py).
     project_root = Path(__file__).resolve().parent
-    saved_models_dir = project_root / "saved_models"
+    saved_models_dir = project_root / "saved_models_HCAL"
     epochs_dir = saved_models_dir / "epochs"
     best_dir = saved_models_dir / "best"
     os.makedirs(epochs_dir, exist_ok=True)
     os.makedirs(best_dir, exist_ok=True)
     log(f"Saving all model checkpoints to: {saved_models_dir}")
-    # --------------------------------------------
 
     for epoch in range(start_epoch, args.epochs):
         residual_loss = 0.0
         mse_loss      = 0.0
-
         for i, data in enumerate(train_dataloader):
             optimizer.zero_grad()
             model.train()
             x = data.to(config.device)
-
-            # sanity check — fail early with clear error if channel/size mismatch
             if x.dim() != 4 or x.shape[1] != config.model.in_channels or x.shape[2] != config.data.image_size or x.shape[3] != config.data.image_size:
                 print(f"DEBUG: batch x.shape = {tuple(x.shape)}; expected (B, {config.model.in_channels}, {config.data.image_size}, {config.data.image_size})")
                 raise RuntimeError(
                     f"Input tensor shape mismatch. Got {tuple(x.shape)}, expected channels={config.model.in_channels}, image_size={config.data.image_size}."
                 )
-
             e_loss, res_loss = train_step(
                 model, diffusion, x, 
                 scaler, optimizer, loss_m, residual_op,
                 config_operator=config_operator, eq_res=args.eq_res, nmulti=args.nmulti
             )
-
             residual_loss += res_loss
             mse_loss      += e_loss
-            
             log(f"[{epoch}, {i}]: eq_res {res_loss:.4f}, mse {e_loss:.4f}")
 
-        # scheduler step
         if optimizer.param_groups[0]['lr'] > args.last_lr:
             scheduler.step()
             log(f"(Scheduler) new lr: {optimizer.param_groups[0]['lr']}")
@@ -345,7 +341,6 @@ def train(config, train_dataset, scaler, args=None):
             optimizer.param_groups[0]['lr'] = args.last_lr
             log(f"(Scheduler) last lr: {optimizer.param_groups[0]['lr']}")
 
-        # Save epoch checkpoint into project-level saved_models/epochs
         ckpt_epochs_path = epochs_dir / f"checkpoint_epoch{epoch+1}.pt"
         torch.save({
             'epoch': epoch,
@@ -357,14 +352,11 @@ def train(config, train_dataset, scaler, args=None):
         }, str(ckpt_epochs_path))
         log(f"Saved epoch checkpoint: {ckpt_epochs_path}")
 
-        # Validation (only when requested)
-        if (epoch + 1) % 1 == 0 and args.validation:  # run validation every epoch
+        if (epoch + 1) % 1 == 0 and args.validation:
             log("Computing validation...")
             val_loss = compute_validation(model, diffusion, train_dataset, config.device, residual_op, noise=validation_noise)
             writer.add_scalar('Val - l1 residual loss', val_loss, epoch)
             log(f"Validation loss: {val_loss}")
-
-            # Save best model by val metric to project-level saved_models/best
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_path = best_dir / "best_model.pt"
@@ -379,28 +371,24 @@ def train(config, train_dataset, scaler, args=None):
 
         writer.add_scalar('MSE error', mse_loss / len(train_dataloader), epoch)
         writer.add_scalar('Vorticity eq residual', residual_loss / len(train_dataloader), epoch)
-        
         if epoch % 5 == 0: writer.flush()
 
 
 def main():
     time_start = time.time()
-
-    new_fold = define_folder()
-    set_logger()
-    log(f"Run folder: {new_fold}")
+    log_root = define_folder()
+    set_logger(log_dir=log_root, log_name="train.log")
+    log(f"Run folder (logs): {log_root}")
 
     args = parse_args()
     config = load_config(args)
 
     log(f"Process ID: {os.getpid()}")
     log(f"Filename: {__file__}")
-
     log("Loading dataset...")
+
     if args.lhc != -1:
         print("LHC mode detected → forcing model to single-channel and using ChannelDataset")
-
-        # Force model to accept 1 input channel and produce 1 output channel before Model(config) is instantiated
         try:
             config.model.in_channels = 1
             config.model.out_ch = 1
@@ -412,7 +400,6 @@ def main():
         except Exception:
             setattr(config.data, "image_size", 256)
 
-        # instantiate LHC dataset (absolute path)
         hdf5_path = "/home/psquare_quantum/Desktop/Diff/guided_diffusion_models_sparse_reconstructions/guiding-diffusion-models-sparse-reconstruction/quark-gluon_data-set_n139306.hdf5"
         dataset = ChannelDataset(
             hdf5_file=hdf5_path,
@@ -443,7 +430,7 @@ def main():
     log("Dataset loaded")
     log(f"Dataset length: {len(train_dataset)}")
 
-    if args.seed == -1: 
+    if args.seed == -1:
         args.seed = int(time.time() * 100) % 2**32
 
     fix_randomness(args.seed)
